@@ -2,7 +2,6 @@ import asyncio
 import html
 import json
 import logging
-logging.basicConfig(level=logging.INFO)
 import random
 import sqlite3
 from datetime import datetime
@@ -23,8 +22,13 @@ from aiogram.types import (
 # ================= CONFIGURATION =================
 BOT_TOKEN = "8774151987:AAGhhtt1gdWIvi07OWzGv2hBhGhQZ2jSh_0"      
 BOT_USERNAME = "@ftcl3bet_bot"          
+
 CHANNEL_ID = -1004329989649             
 CHANNEL_URL = "https://t.me/ftcl3bet_log" 
+
+CHANNEL_2_ID = -1003863595353          # <-- Вставьте ID второго канала Ftcl3News
+CHANNEL_2_URL = "https://t.me/Ftcl3News"
+
 ADMIN_IDS = [1866813859]                 
 DB_NAME = "mifl_stake.db"
 
@@ -84,8 +88,8 @@ def init_db():
         kef_p2 REAL,
         kef_tb REAL DEFAULT 1.85,
         kef_tm REAL DEFAULT 1.85,
-        kef_oz_yes REAL DEFAULT 1.20,
-        kef_oz_no REAL DEFAULT 3.50,
+        kef_oz_yes REAL DEFAULT 1.85,
+        kef_oz_no REAL DEFAULT 1.85,
         kef_exact_score REAL DEFAULT 2.80,
         status TEXT DEFAULT 'OPEN',
         score_home INTEGER DEFAULT NULL,
@@ -204,12 +208,17 @@ def set_balance(user_id: int, new_balance: float):
 
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in ["creator", "administrator", "member"]
+        member1 = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        member2 = await bot.get_chat_member(chat_id=CHANNEL_2_ID, user_id=user_id)
+        
+        status1 = member1.status in ["creator", "administrator", "member"]
+        status2 = member2.status in ["creator", "administrator", "member"]
+        return status1 and status2
     except Exception as e:
         logging.error(f"Ошибка проверки подписки: {e}")
         return True
 
+# --- ДИНАМИЧЕСКИЙ РАСЧЕТ КОЭФФИЦИЕНТОВ НА ОСНОВЕ СТАТИСТИКИ ---
 def calculate_team_odds(home_team: str, away_team: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -218,24 +227,65 @@ def calculate_team_odds(home_team: str, away_team: str):
         cursor.execute("SELECT games_played, wins, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (team,))
         res = cursor.fetchone()
         if not res or res[0] == 0:
-            return 1.0, 0
+            return {
+                "factor": 1.0,
+                "avg_scored": 1.25,
+                "avg_conceded": 1.25,
+                "games": 0
+            }
         gp, w, gs, gc = res
         winrate = w / gp
         g_diff = gs - gc
         factor = 1.0 + (winrate - 0.5) * 0.4 + (g_diff * 0.02)
-        return max(0.5, min(1.5, factor)), g_diff
+        return {
+            "factor": max(0.5, min(1.5, factor)),
+            "avg_scored": gs / gp,
+            "avg_conceded": gc / gp,
+            "games": gp
+        }
 
-    f_home, _ = get_stats(home_team)
-    f_away, _ = get_stats(away_team)
+    st_home = get_stats(home_team)
+    st_away = get_stats(away_team)
     conn.close()
 
-    f_home *= 1.05
+    # 1. Исходы (П1, Х, П2)
+    f_home = st_home["factor"] * 1.05
+    f_away = st_away["factor"]
     base_kef = 1.85
     kef_p1 = round(base_kef / f_home * f_away, 2)
     kef_p2 = round(base_kef / f_away * f_home, 2)
     kef_x = round(3.10 + abs(kef_p1 - kef_p2) * 0.3, 2)
 
-    return max(1.15, kef_p1), max(2.50, kef_x), max(1.15, kef_p2)
+    # 2. Тоталы и Обе Забьют (ТБ/ТМ 2.5, ОЗ Да/Нет)
+    expected_goals = (st_home["avg_scored"] + st_away["avg_conceded"] + st_away["avg_scored"] + st_home["avg_conceded"]) / 2
+    if st_home["games"] == 0 and st_away["games"] == 0:
+        expected_goals = 2.5
+
+    # Чем больше ожидается голов, тем ниже кэф на ТБ 2.5 и ОЗ Да
+    base_tb = 1.85
+    kef_tb = round(base_tb * (2.5 / max(0.8, expected_goals)), 2)
+    kef_tm = round(base_tb * (max(0.8, expected_goals) / 2.5), 2)
+
+    # Вероятность того, что обе команды забьют
+    prob_home_scores = min(0.9, max(0.1, st_home["avg_scored"] / (st_home["avg_scored"] + st_away["avg_conceded"] + 0.1) * 1.2))
+    prob_away_scores = min(0.9, max(0.1, st_away["avg_scored"] / (st_away["avg_scored"] + st_home["avg_conceded"] + 0.1) * 1.2))
+    both_score_prob = prob_home_scores * prob_away_scores
+
+    if st_home["games"] == 0 and st_away["games"] == 0:
+        both_score_prob = 0.52
+
+    kef_oz_yes = round(1.0 / max(0.15, min(0.85, both_score_prob)), 2)
+    kef_oz_no = round(1.0 / max(0.15, min(0.85, 1.0 - both_score_prob)), 2)
+
+    return (
+        max(1.05, kef_p1),
+        max(2.10, kef_x),
+        max(1.05, kef_p2),
+        max(1.10, min(5.0, kef_tb)),
+        max(1.10, min(5.0, kef_tm)),
+        max(1.10, min(5.0, kef_oz_yes)),
+        max(1.10, min(5.0, kef_oz_no))
+    )
 
 def recalculate_dynamic_odds(match_id: int):
     conn = sqlite3.connect(DB_NAME)
@@ -247,7 +297,7 @@ def recalculate_dynamic_odds(match_id: int):
         conn.close()
         return
 
-    p1_b, x_b, p2_b = calculate_team_odds(match[0], match[1])
+    p1_b, x_b, p2_b, tb_b, tm_b, oz_y_b, oz_n_b = calculate_team_odds(match[0], match[1])
 
     cursor.execute("SELECT outcome, SUM(amount) FROM bets WHERE match_id = ? AND is_express = 0 GROUP BY outcome", (match_id,))
     pools = dict(cursor.fetchall())
@@ -260,10 +310,10 @@ def recalculate_dynamic_odds(match_id: int):
     k_p1 = adjust_kef(p1_b, "P1")
     k_x = adjust_kef(x_b, "X")
     k_p2 = adjust_kef(p2_b, "P2")
-    k_tb = adjust_kef(1.85, "TB")
-    k_tm = adjust_kef(1.85, "TM")
-    k_oz_yes = adjust_kef(1.20, "OZ_YES", factor=0.00003)
-    k_oz_no = adjust_kef(3.50, "OZ_NO", factor=0.00003)
+    k_tb = adjust_kef(tb_b, "TB")
+    k_tm = adjust_kef(tm_b, "TM")
+    k_oz_yes = adjust_kef(oz_y_b, "OZ_YES", factor=0.00003)
+    k_oz_no = adjust_kef(oz_n_b, "OZ_NO", factor=0.00003)
 
     cursor.execute("""
         UPDATE matches 
@@ -285,6 +335,7 @@ class AdminStates(StatesGroup):
     waiting_promo_name = State()
     waiting_promo_reward = State()
     waiting_promo_uses = State()
+    waiting_broadcast_message = State()
 
 class UserStates(StatesGroup):
     enter_bet_amount = State()
@@ -312,7 +363,8 @@ async def ban_check_middleware(handler, event, data):
 # ================= KEYBOARDS =================
 def sub_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Подписаться на канал", url=CHANNEL_URL)],
+        [InlineKeyboardButton(text="📢 Канал 1: Ставки & Логи", url=CHANNEL_URL)],
+        [InlineKeyboardButton(text="📢 Канал 2: Новости FTCL³", url=CHANNEL_2_URL)],
         [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")]
     ])
 
@@ -330,6 +382,7 @@ def admin_main_kb():
         [InlineKeyboardButton(text="⚽ Управление матчами", callback_data="admin_matches")],
         [InlineKeyboardButton(text="📦 Архив матчей", callback_data="admin_archive_matches")],
         [InlineKeyboardButton(text="👥 Управление игроками", callback_data="admin_users_0")],
+        [InlineKeyboardButton(text="📢 Массовая Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="🔥 Ставка Дня", callback_data="admin_daily_bet")],
         [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo")],
         [InlineKeyboardButton(text=line_str, callback_data="admin_toggle_line")]
@@ -344,7 +397,7 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
 
     if not await check_subscription(bot, message.from_user.id):
         await message.answer(
-            "⚠️ Для работы с ботом необходимо подписаться на наш канал!",
+            "⚠️ Для работы с ботом необходимо подписаться на оба наших канала!",
             reply_markup=sub_kb()
         )
         return
@@ -363,7 +416,7 @@ async def cb_check_sub(call: CallbackQuery, bot: Bot):
             reply_markup=main_menu_kb()
         )
     else:
-        await call.answer("❌ Вы всё ещё не подписались на канал!", show_alert=True)
+        await call.answer("❌ Вы не подписались на оба канала!", show_alert=True)
 
 @router.callback_query(F.data == "menu_main")
 async def cb_main(call: CallbackQuery, state: FSMContext):
@@ -419,12 +472,11 @@ async def cb_leaderboard(call: CallbackQuery):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT u.username, u.user_id, SUM(b.payout - b.amount) as net_profit
-        FROM bets b
-        JOIN users u ON b.user_id = u.user_id
-        WHERE b.status IN ('WIN', 'LOSE')
-        GROUP BY b.user_id
-        ORDER BY net_profit DESC
+        SELECT u.username, u.user_id, COALESCE(SUM(b.payout - b.amount), 0) as net_profit
+        FROM users u
+        LEFT JOIN bets b ON u.user_id = b.user_id AND b.status IN ('WIN', 'LOSE')
+        GROUP BY u.user_id
+        ORDER BY net_profit DESC, u.balance DESC
         LIMIT 10
     """)
     top = cursor.fetchall()
@@ -990,6 +1042,54 @@ async def cb_admin_toggle_line(call: CallbackQuery):
     await call.answer(f"Линия ставок теперь {status_str}!", show_alert=True)
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
 
+# --- Массовая рассылка ---
+@router.callback_query(F.data == "admin_broadcast")
+async def cb_admin_broadcast(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    await state.set_state(AdminStates.waiting_broadcast_message)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_main")]])
+    await call.message.edit_text(
+        "📢 <b>Массовая Рассылка</b>\n\n"
+        "Пришлите сообщение для рассылки всем пользователям (поддерживаются форматирование текста, фотографии и файлы):",
+        reply_markup=kb
+    )
+
+@router.message(AdminStates.waiting_broadcast_message)
+async def process_admin_broadcast(message: Message, state: FSMContext, bot: Bot):
+    if message.from_user.id not in ADMIN_IDS: return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
+    users = cursor.fetchall()
+    conn.close()
+
+    await message.answer(f"⏳ Начинаю рассылку для {len(users)} пользователей...")
+
+    success = 0
+    failed = 0
+
+    for u in users:
+        u_id = u[0]
+        try:
+            await bot.copy_message(
+                chat_id=u_id,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id
+            )
+            success += 1
+            await asyncio.sleep(0.04)
+        except Exception:
+            failed += 1
+
+    await state.clear()
+    await message.answer(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"Успешно отправлено: <code>{success}</code>\n"
+        f"Ошибок: <code>{failed}</code>",
+        reply_markup=admin_main_kb()
+    )
+
 @router.callback_query(F.data == "admin_create_promo")
 async def cb_admin_create_promo(call: CallbackQuery, state: FSMContext):
     if call.from_user.id not in ADMIN_IDS: return
@@ -1090,17 +1190,25 @@ async def cb_admin_add_match(call: CallbackQuery, state: FSMContext):
 async def process_admin_add_match(message: Message, state: FSMContext):
     try:
         home, away = [x.strip() for x in message.text.split("-")]
-        p1, x, p2 = calculate_team_odds(home, away)
+        p1, x, p2, tb, tm, oz_y, oz_n = calculate_team_odds(home, away)
 
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO matches (home_team, away_team, kef_p1, kef_x, kef_p2) VALUES (?, ?, ?, ?, ?)", (home, away, p1, x, p2))
+        cursor.execute(
+            "INSERT INTO matches (home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (home, away, p1, x, p2, tb, tm, oz_y, oz_n)
+        )
         conn.commit()
         conn.close()
 
         await state.clear()
         home_esc, away_esc = html.escape(home), html.escape(away)
-        await message.answer(f"✅ Матч <b>{home_esc} — {away_esc}</b> добавлен!\nАвтокэфы: П1 <code>{p1}</code> | Х <code>{x}</code> | П2 <code>{p2}</code>", reply_markup=admin_main_kb())
+        await message.answer(
+            f"✅ Матч <b>{home_esc} — {away_esc}</b> добавлен!\n"
+            f"Автокэфы: П1 <code>{p1}</code> | Х <code>{x}</code> | П2 <code>{p2}</code>\n"
+            f"ТБ 2.5 <code>{tb}</code> | ТМ 2.5 <code>{tm}</code> | ОЗ Да <code>{oz_y}</code> | ОЗ Нет <code>{oz_n}</code>",
+            reply_markup=admin_main_kb()
+        )
     except Exception:
         await message.answer("❌ Ошибка формата! Используйте: <code>Команда1 - Команда2</code>")
 
@@ -1139,9 +1247,10 @@ async def cb_admin_match_detail(call: CallbackQuery):
 
     await call.message.edit_text(text, reply_markup=kb)
 
-# --- ИСПРАВЛЕННОЕ РЕДАКТИРОВАНИЕ И АРХИВАЦИЯ МАТЧА ---
+# --- РЕДАКТИРОВАНИЕ И АРХИВАЦИЯ МАТЧА ---
 @router.callback_query(F.data.startswith("am_teams_"))
 async def cb_am_edit_teams(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
     await state.update_data(edit_match_id=match_id)
     await state.set_state(AdminStates.edit_teams)
@@ -1167,6 +1276,7 @@ async def process_edit_teams(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("am_kefs_"))
 async def cb_am_edit_kefs(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
     await state.update_data(edit_match_id=match_id)
     await state.set_state(AdminStates.edit_kefs)
@@ -1192,6 +1302,7 @@ async def process_edit_kefs(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("am_archive_"))
 async def cb_am_archive(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -1204,6 +1315,7 @@ async def cb_am_archive(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("am_delete_"))
 async def cb_am_delete(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -1218,6 +1330,7 @@ async def cb_am_delete(call: CallbackQuery):
 # --- РАСЧЕТ МАТЧА И ЭКСПРЕССОВ ---
 @router.callback_query(F.data.startswith("am_finish_"))
 async def cb_admin_finish(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
     await state.update_data(finish_match_id=match_id)
     await state.set_state(AdminStates.finish_score)
@@ -1442,6 +1555,7 @@ async def process_user_add_bal(message: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("u_toggle_ban_"))
 async def cb_toggle_ban(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS: return
     u_id = int(call.data.split("_")[3])
     user = get_user(u_id)
     new_status = 0 if user[3] == 1 else 1
@@ -1457,6 +1571,7 @@ async def cb_toggle_ban(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("u_logs_"))
 async def cb_user_logs(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS: return
     u_id = int(call.data.split("_")[2])
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -1474,6 +1589,7 @@ async def cb_user_logs(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("u_reset_"))
 async def cb_user_reset(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS: return
     u_id = int(call.data.split("_")[2])
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -1531,6 +1647,7 @@ async def cb_admin_daily_bet(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "admin_approve_daily")
 async def cb_approve_daily(call: CallbackQuery, state: FSMContext, bot: Bot):
+    if call.from_user.id not in ADMIN_IDS: return
     data = await state.get_data()
     bet_text = data.get("daily_text")
     kef = data.get("daily_kef")
