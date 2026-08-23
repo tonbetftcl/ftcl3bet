@@ -26,7 +26,7 @@ BOT_USERNAME = "@ftcl3bet_bot"
 CHANNEL_ID = -1004329989649             
 CHANNEL_URL = "https://t.me/ftcl3bet_log" 
 
-CHANNEL_2_ID = -1003863595353          # <-- Вставьте ID второго канала Ftcl3News
+CHANNEL_2_ID = -1003863595353          
 CHANNEL_2_URL = "https://t.me/Ftcl3News"
 
 ADMIN_IDS = [1866813859]                 
@@ -256,26 +256,29 @@ def calculate_team_odds(home_team: str, away_team: str):
     kef_p2 = round(base_kef / f_away * f_home, 2)
     kef_x = round(3.10 + abs(kef_p1 - kef_p2) * 0.3, 2)
 
-    # 2. Тоталы и Обе Забьют (ТБ/ТМ 2.5, ОЗ Да/Нет)
+    # 2. Тоталы (ТБ/ТМ 2.5)
     expected_goals = (st_home["avg_scored"] + st_away["avg_conceded"] + st_away["avg_scored"] + st_home["avg_conceded"]) / 2
     if st_home["games"] == 0 and st_away["games"] == 0:
         expected_goals = 2.5
 
-    # Чем больше ожидается голов, тем ниже кэф на ТБ 2.5 и ОЗ Да
     base_tb = 1.85
     kef_tb = round(base_tb * (2.5 / max(0.8, expected_goals)), 2)
     kef_tm = round(base_tb * (max(0.8, expected_goals) / 2.5), 2)
 
-    # Вероятность того, что обе команды забьют
+    # 3. Обе Забьют (Да: 1.20 - 1.90, Нет: 1.80 - 2.45)
     prob_home_scores = min(0.9, max(0.1, st_home["avg_scored"] / (st_home["avg_scored"] + st_away["avg_conceded"] + 0.1) * 1.2))
     prob_away_scores = min(0.9, max(0.1, st_away["avg_scored"] / (st_away["avg_scored"] + st_home["avg_conceded"] + 0.1) * 1.2))
     both_score_prob = prob_home_scores * prob_away_scores
 
     if st_home["games"] == 0 and st_away["games"] == 0:
-        both_score_prob = 0.52
+        both_score_prob = 0.50
 
-    kef_oz_yes = round(1.0 / max(0.15, min(0.85, both_score_prob)), 2)
-    kef_oz_no = round(1.0 / max(0.15, min(0.85, 1.0 - both_score_prob)), 2)
+    raw_oz_yes = round(1.0 / max(0.15, min(0.85, both_score_prob)), 2)
+    raw_oz_no = round(1.0 / max(0.15, min(0.85, 1.0 - both_score_prob)), 2)
+
+    # Жесткое ограничение диапазонов для ОЗ
+    kef_oz_yes = max(1.20, min(1.90, raw_oz_yes))
+    kef_oz_no = max(1.80, min(2.45, raw_oz_no))
 
     return (
         max(1.05, kef_p1),
@@ -283,8 +286,8 @@ def calculate_team_odds(home_team: str, away_team: str):
         max(1.05, kef_p2),
         max(1.10, min(5.0, kef_tb)),
         max(1.10, min(5.0, kef_tm)),
-        max(1.10, min(5.0, kef_oz_yes)),
-        max(1.10, min(5.0, kef_oz_no))
+        kef_oz_yes,
+        kef_oz_no
     )
 
 def recalculate_dynamic_odds(match_id: int):
@@ -302,18 +305,18 @@ def recalculate_dynamic_odds(match_id: int):
     cursor.execute("SELECT outcome, SUM(amount) FROM bets WHERE match_id = ? AND is_express = 0 GROUP BY outcome", (match_id,))
     pools = dict(cursor.fetchall())
 
-    def adjust_kef(base_kef, outcome_key, factor=0.00005):
+    def adjust_kef(base_kef, outcome_key, factor=0.00005, min_val=1.05, max_val=5.0):
         staked = pools.get(outcome_key, 0)
         new_kef = base_kef / (1 + staked * factor)
-        return max(1.05, round(new_kef, 2))
+        return max(min_val, min(max_val, round(new_kef, 2)))
 
     k_p1 = adjust_kef(p1_b, "P1")
     k_x = adjust_kef(x_b, "X")
     k_p2 = adjust_kef(p2_b, "P2")
     k_tb = adjust_kef(tb_b, "TB")
     k_tm = adjust_kef(tm_b, "TM")
-    k_oz_yes = adjust_kef(oz_y_b, "OZ_YES", factor=0.00003)
-    k_oz_no = adjust_kef(oz_n_b, "OZ_NO", factor=0.00003)
+    k_oz_yes = adjust_kef(oz_y_b, "OZ_YES", factor=0.00003, min_val=1.20, max_val=1.90)
+    k_oz_no = adjust_kef(oz_n_b, "OZ_NO", factor=0.00003, min_val=1.80, max_val=2.45)
 
     cursor.execute("""
         UPDATE matches 
@@ -840,7 +843,7 @@ async def ask_express_match_outcome(message: Message, state: FSMContext):
             
             kef = choice.get("kef", k_map.get(outcome_code, 1.0))
             total_kef *= kef
-            summary_lines.append(f"• {m[1]} vs {m[2]} — <b>{outcome_code}</b> (кэф {kef})")
+            summary_lines.append(f"• {m[0]} vs {m[1]} — <b>{outcome_code}</b> (кэф {kef})")
 
             express_matches_data.append({
                 "match_id": m_id,
@@ -886,28 +889,28 @@ async def ask_express_match_outcome(message: Message, state: FSMContext):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=f"П1 ({m[2]})", callback_data=f"exp_pick_{m_id}_P1_{m[2]}"),
-            InlineKeyboardButton(text=f"Х ({m[3]})", callback_data=f"exp_pick_{m_id}_X_{m[3]}"),
-            InlineKeyboardButton(text=f"П2 ({m[4]})", callback_data=f"exp_pick_{m_id}_P2_{m[4]}"),
+            InlineKeyboardButton(text=f"П1 ({m[2]})", callback_data=f"exp_pick:{m_id}:P1:{m[2]}"),
+            InlineKeyboardButton(text=f"Х ({m[3]})", callback_data=f"exp_pick:{m_id}:X:{m[3]}"),
+            InlineKeyboardButton(text=f"П2 ({m[4]})", callback_data=f"exp_pick:{m_id}:P2:{m[4]}"),
         ],
         [
-            InlineKeyboardButton(text=f"ТБ 2.5 ({m[5]})", callback_data=f"exp_pick_{m_id}_TB_{m[5]}"),
-            InlineKeyboardButton(text=f"ТМ 2.5 ({m[6]})", callback_data=f"exp_pick_{m_id}_TM_{m[6]}"),
+            InlineKeyboardButton(text=f"ТБ 2.5 ({m[5]})", callback_data=f"exp_pick:{m_id}:TB:{m[5]}"),
+            InlineKeyboardButton(text=f"ТМ 2.5 ({m[6]})", callback_data=f"exp_pick:{m_id}:TM:{m[6]}"),
         ],
         [
-            InlineKeyboardButton(text=f"ОЗ Да ({m[7]})", callback_data=f"exp_pick_{m_id}_OZ_YES_{m[7]}"),
-            InlineKeyboardButton(text=f"ОЗ Нет ({m[8]})", callback_data=f"exp_pick_{m_id}_OZ_NO_{m[8]}"),
+            InlineKeyboardButton(text=f"ОЗ Да ({m[7]})", callback_data=f"exp_pick:{m_id}:OZ_YES:{m[7]}"),
+            InlineKeyboardButton(text=f"ОЗ Нет ({m[8]})", callback_data=f"exp_pick:{m_id}:OZ_NO:{m[8]}"),
         ]
     ])
 
     await message.edit_text(text, reply_markup=kb)
 
-@router.callback_query(F.data.startswith("exp_pick_"))
+@router.callback_query(F.data.startswith("exp_pick:"))
 async def cb_express_pick_outcome(call: CallbackQuery, state: FSMContext):
-    parts = call.data.split("_")
-    m_id = int(parts[2])
-    outcome = parts[3]
-    kef = float(parts[4])
+    parts = call.data.split(":")
+    m_id = int(parts[1])
+    outcome = parts[2]
+    kef = float(parts[3])
 
     data = await state.get_data()
     choices = data.get("express_choices", {})
