@@ -248,7 +248,6 @@ def calculate_team_odds(home_team: str, away_team: str):
     st_away = get_stats(away_team)
     conn.close()
 
-    # 1. Исходы (П1, Х, П2)
     f_home = st_home["factor"] * 1.05
     f_away = st_away["factor"]
     base_kef = 1.85
@@ -256,7 +255,6 @@ def calculate_team_odds(home_team: str, away_team: str):
     kef_p2 = round(base_kef / f_away * f_home, 2)
     kef_x = round(3.10 + abs(kef_p1 - kef_p2) * 0.3, 2)
 
-    # 2. Тоталы (ТБ/ТМ 2.5)
     expected_goals = (st_home["avg_scored"] + st_away["avg_conceded"] + st_away["avg_scored"] + st_home["avg_conceded"]) / 2
     if st_home["games"] == 0 and st_away["games"] == 0:
         expected_goals = 2.5
@@ -265,7 +263,6 @@ def calculate_team_odds(home_team: str, away_team: str):
     kef_tb = round(base_tb * (2.5 / max(0.8, expected_goals)), 2)
     kef_tm = round(base_tb * (max(0.8, expected_goals) / 2.5), 2)
 
-    # 3. Обе Забьют (Да: 1.20 - 1.90, Нет: 1.80 - 2.45)
     prob_home_scores = min(0.9, max(0.1, st_home["avg_scored"] / (st_home["avg_scored"] + st_away["avg_conceded"] + 0.1) * 1.2))
     prob_away_scores = min(0.9, max(0.1, st_away["avg_scored"] / (st_away["avg_scored"] + st_home["avg_conceded"] + 0.1) * 1.2))
     both_score_prob = prob_home_scores * prob_away_scores
@@ -276,7 +273,6 @@ def calculate_team_odds(home_team: str, away_team: str):
     raw_oz_yes = round(1.0 / max(0.15, min(0.85, both_score_prob)), 2)
     raw_oz_no = round(1.0 / max(0.15, min(0.85, 1.0 - both_score_prob)), 2)
 
-    # Жесткое ограничение диапазонов для ОЗ
     kef_oz_yes = max(1.20, min(1.90, raw_oz_yes))
     kef_oz_no = max(1.80, min(2.45, raw_oz_no))
 
@@ -389,6 +385,11 @@ def admin_main_kb():
         [InlineKeyboardButton(text="🔥 Ставка Дня", callback_data="admin_daily_bet")],
         [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin_create_promo")],
         [InlineKeyboardButton(text=line_str, callback_data="admin_toggle_line")]
+    ])
+
+def cancel_bet_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="menu_line_type")]
     ])
 
 # ================= USER HANDLERS =================
@@ -654,8 +655,10 @@ async def cb_bet_init(call: CallbackQuery, state: FSMContext):
         await state.set_state(UserStates.enter_exact_score)
         await call.message.edit_text(
             f"🎯 <b>Ставка на Точный Счёт</b> ({home} — {away})\n"
-            f"📈 Базовый кэф: <code>{kef}</code>\n\n"
-            f"Введите предполагаемый счет в формате <code>Х:Х</code> (например, <code>2:1</code>, <code>1:1</code>):"
+            f"📈 Базовый кэф: <code>{kef}</code>\n"
+            f"💵 <b>Ваш баланс:</b> <code>{user[2]:,.2f}</code> монет\n\n"
+            f"Введите предполагаемый счет сообщением в чат в формате <code>Х:Х</code> (например, <code>2:1</code>, <code>1:1</code>):",
+            reply_markup=cancel_bet_kb()
         )
         return
 
@@ -665,20 +668,21 @@ async def cb_bet_init(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text(
         f"🎯 <b>Ставка:</b> {home} — {away} (<code>{outcome}</code>)\n"
         f"📈 Коэффициент: <code>{kef}</code>\n"
-        f"💵 Ваш баланс: <code>{user[2]:.2f}</code>\n\n"
-        f"Введите сумму ставки сообщением в чат:"
+        f"💵 <b>Ваш текущий баланс:</b> <code>{user[2]:,.2f}</code> монет\n\n"
+        f"Введите сумму ставки сообщением в чат:",
+        reply_markup=cancel_bet_kb()
     )
 
 @router.message(UserStates.enter_exact_score)
 async def process_exact_score_input(message: Message, state: FSMContext):
     text = message.text.strip()
     if ":" not in text:
-        await message.answer("❌ Неверный формат счета! Введите счет через двоеточие, например: <code>2:1</code>")
+        await message.answer("❌ Неверный формат счета! Введите счет через двоеточие, например: <code>2:1</code>", reply_markup=cancel_bet_kb())
         return
 
     parts = text.split(":")
     if not (parts[0].isdigit() and parts[1].isdigit()):
-        await message.answer("❌ Числа в счете должны быть целыми!")
+        await message.answer("❌ Числа в счете должны быть целыми!", reply_markup=cancel_bet_kb())
         return
 
     exact_score = f"{parts[0]}:{parts[1]}"
@@ -691,8 +695,9 @@ async def process_exact_score_input(message: Message, state: FSMContext):
     await message.answer(
         f"🎯 <b>Ставка на Точный Счёт:</b> {data['home']} — {data['away']} (<code>{exact_score}</code>)\n"
         f"📈 Коэффициент: <code>{data['kef']}</code>\n"
-        f"💵 Ваш баланс: <code>{user[2]:.2f}</code>\n\n"
-        f"Введите сумму ставки сообщением в чат:"
+        f"💵 <b>Ваш текущий баланс:</b> <code>{user[2]:,.2f}</code> монет\n\n"
+        f"Введите сумму ставки сообщением в чат:",
+        reply_markup=cancel_bet_kb()
     )
 
 @router.message(UserStates.enter_bet_amount)
@@ -701,25 +706,31 @@ async def process_bet_amount(message: Message, state: FSMContext, bot: Bot):
         amount = float(message.text)
         if amount <= 0: raise ValueError()
     except ValueError:
-        await message.answer("❌ Введите корректное число!")
+        await message.answer("❌ Введите корректную сумму ставки числом!", reply_markup=cancel_bet_kb())
         return
 
-    user = get_user(message.from_user.id, message.from_user.username)
+    user_id = message.from_user.id
+    user = get_user(user_id, message.from_user.username)
+
     if user[2] < amount:
-        await message.answer("❌ Недостаточно монет на балансе!")
-        await state.clear()
+        await message.answer(
+            f"❌ Недостаточно монет на балансе!\n"
+            f"💵 Ваш баланс: <code>{user[2]:,.2f}</code> монет\n"
+            f"Введите другую сумму:",
+            reply_markup=cancel_bet_kb()
+        )
         return
 
     data = await state.get_data()
     match_id = data["match_id"]
 
-    update_balance(message.from_user.id, -amount)
+    update_balance(user_id, -amount)
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO bets (user_id, match_id, outcome, kef, amount) VALUES (?, ?, ?, ?, ?)",
-        (message.from_user.id, match_id, data["outcome"], data["kef"], amount)
+        (user_id, match_id, data["outcome"], data["kef"], amount)
     )
     bet_id = cursor.lastrowid
     conn.commit()
@@ -727,21 +738,23 @@ async def process_bet_amount(message: Message, state: FSMContext, bot: Bot):
 
     recalculate_dynamic_odds(match_id)
 
-    log_action(message.from_user.id, f"Сделал ставку {amount} на {data['home']}-{data['away']} ({data['outcome']})")
+    log_action(user_id, f"Сделал ставку {amount} на {data['home']}-{data['away']} ({data['outcome']})")
     await state.clear()
 
     home, away = data['home'], data['away']
+    new_user = get_user(user_id)
     await message.answer(
         f"✅ <b>Ставка принята!</b>\n\n"
         f"Матч: {home} — {away}\n"
         f"Исход: <code>{data['outcome']}</code> | Кэф: <code>{data['kef']}</code>\n"
-        f"Сумма: <code>{amount:.2f}</code> монет",
+        f"Сумма: <code>{amount:,.2f}</code> монет\n"
+        f"💵 Остаток на балансе: <code>{new_user[2]:,.2f}</code> монет",
         reply_markup=main_menu_kb()
     )
 
     if amount >= 15000:
         try:
-            username_str = get_user_display_name(message.from_user.username, message.from_user.first_name, message.from_user.id)
+            username_str = get_user_display_name(message.from_user.username, message.from_user.first_name, user_id)
             post_text = (
                 f"💣 <b>КРУПНАЯ СТАВКА!</b>\n\n"
                 f"👤 Пользователь: <b>{username_str}</b>\n"
@@ -866,10 +879,10 @@ async def ask_express_match_outcome(message: Message, state: FSMContext):
             f"🔥 <b>Ваш Экспресс сформирован!</b>\n\n"
             f"{'\n'.join(summary_lines)}\n\n"
             f"📈 <b>Итоговый коэффициент: {total_kef}</b>\n"
-            f"💵 Ваш баланс: <code>{user[2]:.2f}</code> монет\n\n"
-            f"Введите сумму вашей ставки:"
+            f"💵 <b>Ваш текущий баланс:</b> <code>{user[2]:,.2f}</code> монет\n\n"
+            f"Введите сумму ставки на экспресс сообщением в чат:"
         )
-        await message.edit_text(text)
+        await message.edit_text(text, reply_markup=cancel_bet_kb())
         return
 
     m_id = selected[idx]
@@ -927,13 +940,19 @@ async def process_express_amount(message: Message, state: FSMContext, bot: Bot):
         amount = float(message.text)
         if amount <= 0: raise ValueError()
     except ValueError:
-        await message.answer("❌ Введите корректное число!")
+        await message.answer("❌ Введите корректную сумму ставки числом!", reply_markup=cancel_bet_kb())
         return
 
-    user = get_user(message.from_user.id, message.from_user.username)
+    user_id = message.from_user.id
+    user = get_user(user_id, message.from_user.username)
+
     if user[2] < amount:
-        await message.answer("❌ Недостаточно монет на балансе!")
-        await state.clear()
+        await message.answer(
+            f"❌ Недостаточно монет на балансе!\n"
+            f"💵 Ваш баланс: <code>{user[2]:,.2f}</code> монет\n"
+            f"Введите другую сумму:",
+            reply_markup=cancel_bet_kb()
+        )
         return
 
     data = await state.get_data()
@@ -941,32 +960,34 @@ async def process_express_amount(message: Message, state: FSMContext, bot: Bot):
     summary = data["express_summary"]
     matches_json = data["express_matches_json"]
 
-    update_balance(message.from_user.id, -amount)
+    update_balance(user_id, -amount)
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute(
         "INSERT INTO bets (user_id, match_id, outcome, kef, amount, is_express, express_details, express_matches) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (message.from_user.id, 0, "EXPRESS", total_kef, amount, 1, summary, matches_json)
+        (user_id, 0, "EXPRESS", total_kef, amount, 1, summary, matches_json)
     )
     bet_id = cursor.lastrowid
     conn.commit()
     conn.close()
 
-    log_action(message.from_user.id, f"Сделал экспресс {amount} (кэф {total_kef})")
+    log_action(user_id, f"Сделал экспресс {amount} (кэф {total_kef})")
     await state.clear()
 
+    new_user = get_user(user_id)
     await message.answer(
         f"✅ <b>Экспресс принят!</b>\n\n"
         f"{summary}\n\n"
         f"📈 Итоговый кэф: <code>{total_kef}</code>\n"
-        f"💰 Сумма: <code>{amount:.2f}</code> монет",
+        f"💰 Сумма: <code>{amount:,.2f}</code> монет\n"
+        f"💵 Остаток на балансе: <code>{new_user[2]:,.2f}</code> монет",
         reply_markup=main_menu_kb()
     )
 
     if amount >= 15000:
         try:
-            username_str = get_user_display_name(message.from_user.username, message.from_user.first_name, message.from_user.id)
+            username_str = get_user_display_name(message.from_user.username, message.from_user.first_name, user_id)
             post_text = (
                 f"🔥 <b>КРУПНЫЙ ЭКСПРЕСС!</b>\n\n"
                 f"👤 Пользователь: <b>{username_str}</b>\n\n"
