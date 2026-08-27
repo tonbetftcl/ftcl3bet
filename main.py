@@ -357,12 +357,12 @@ def get_all_teams():
     return teams
 
 def update_express_details_for_team(cursor, old_name: str, new_name: str):
-    cursor.execute("SELECT id, express_details FROM bets WHERE is_express = 1 AND express_details LIKE %s", (f"%{old_name}%",))
+    cursor.execute("SELECT id, express_details, express_matches FROM bets WHERE is_express = 1 AND (express_details LIKE %s OR express_matches LIKE %s)", (f"%{old_name}%", f"%{old_name}%"))
     exp_bets = cursor.fetchall()
-    for b_id, details in exp_bets:
-        if details:
-            new_details = details.replace(old_name, new_name)
-            cursor.execute("UPDATE bets SET express_details = %s WHERE id = %s", (new_details, b_id))
+    for b_id, details, matches_json in exp_bets:
+        new_details = details.replace(old_name, new_name) if details else details
+        new_json = matches_json.replace(old_name, new_name) if matches_json else matches_json
+        cursor.execute("UPDATE bets SET express_details = %s, express_matches = %s WHERE id = %s", (new_details, new_json, b_id))
 
 def trigger_recalc_for_team(cursor, team_name: str):
     cursor.execute("SELECT id FROM matches WHERE status = 'OPEN' AND (home_team = %s OR away_team = %s)", (team_name, team_name))
