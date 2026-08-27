@@ -3,7 +3,8 @@ import html
 import json
 import logging
 import random
-import sqlite3
+import psycopg2
+from psycopg2 import pool
 from datetime import datetime
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
@@ -30,13 +31,22 @@ CHANNEL_2_ID = -1003863595353
 CHANNEL_2_URL = "https://t.me/Ftcl3News"
 
 ADMIN_IDS = [1866813859]                 
-DB_NAME = "mifl_stake.db"
+DB_URI = "postgresql://neondb_owner:npg_BxP6O4gVmfru@ep-hidden-cloud-b2fxw8g8-pooler.c-6.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 
 logging.basicConfig(level=logging.INFO)
 
+# ================= DATABASE CONNECTION POOL =================
+db_pool = psycopg2.pool.SimpleConnectionPool(1, 20, DB_URI)
+
+def get_db_connection():
+    return db_pool.getconn()
+
+def release_db_connection(conn):
+    db_pool.putconn(conn)
+
 # ================= DATABASE SETUP =================
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -45,100 +55,96 @@ def init_db():
         value TEXT
     )
     """)
-    cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('line_open', '1')")
+    cursor.execute("INSERT INTO settings (key, value) VALUES ('line_open', '1') ON CONFLICT (key) DO NOTHING")
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
+        user_id BIGINT PRIMARY KEY,
         username TEXT,
-        balance REAL DEFAULT 1000.0,
-        is_banned INTEGER DEFAULT 0,
+        balance DOUBLE PRECISION DEFAULT 1000.0,
+        is_banned INT DEFAULT 0,
         last_bonus TEXT
     )
     """)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS user_logs (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT,
         action TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS team_stats (
         team_name TEXT PRIMARY KEY,
-        games_played INTEGER DEFAULT 0,
-        wins INTEGER DEFAULT 0,
-        draws INTEGER DEFAULT 0,
-        losses INTEGER DEFAULT 0,
-        goals_scored INTEGER DEFAULT 0,
-        goals_conceded INTEGER DEFAULT 0
+        games_played INT DEFAULT 0,
+        wins INT DEFAULT 0,
+        draws INT DEFAULT 0,
+        losses INT DEFAULT 0,
+        goals_scored INT DEFAULT 0,
+        goals_conceded INT DEFAULT 0
     )
     """)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS matches (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id BIGSERIAL PRIMARY KEY,
         home_team TEXT,
         away_team TEXT,
-        kef_p1 REAL,
-        kef_x REAL,
-        kef_p2 REAL,
-        kef_tb REAL DEFAULT 1.85,
-        kef_tm REAL DEFAULT 1.85,
-        kef_oz_yes REAL DEFAULT 1.85,
-        kef_oz_no REAL DEFAULT 1.85,
-        kef_exact_score REAL DEFAULT 2.80,
+        kef_p1 DOUBLE PRECISION,
+        kef_x DOUBLE PRECISION,
+        kef_p2 DOUBLE PRECISION,
+        kef_tb DOUBLE PRECISION DEFAULT 1.85,
+        kef_tm DOUBLE PRECISION DEFAULT 1.85,
+        kef_oz_yes DOUBLE PRECISION DEFAULT 1.85,
+        kef_oz_no DOUBLE PRECISION DEFAULT 1.85,
+        kef_exact_score DOUBLE PRECISION DEFAULT 2.80,
         status TEXT DEFAULT 'OPEN',
-        score_home INTEGER DEFAULT NULL,
-        score_away INTEGER DEFAULT NULL
+        score_home INT DEFAULT NULL,
+        score_away INT DEFAULT NULL
     )
     """)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS bets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        match_id INTEGER,
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT,
+        match_id BIGINT,
         outcome TEXT,
-        kef REAL,
-        amount REAL,
+        kef DOUBLE PRECISION,
+        amount DOUBLE PRECISION,
         status TEXT DEFAULT 'PENDING',
-        payout REAL DEFAULT 0.0,
-        channel_msg_id INTEGER DEFAULT NULL,
+        payout DOUBLE PRECISION DEFAULT 0.0,
+        channel_msg_id BIGINT DEFAULT NULL,
         original_text TEXT DEFAULT NULL,
-        is_express INTEGER DEFAULT 0,
+        is_express INT DEFAULT 0,
         express_details TEXT DEFAULT NULL,
         express_matches TEXT DEFAULT NULL
     )
     """)
 
-    cursor.execute("PRAGMA table_info(bets)")
-    b_cols = [c[1] for c in cursor.fetchall()]
-    if "express_matches" not in b_cols:
-        cursor.execute("ALTER TABLE bets ADD COLUMN express_matches TEXT DEFAULT NULL")
-
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS promo_codes (
         code TEXT PRIMARY KEY,
-        reward REAL,
-        max_uses INTEGER,
-        current_uses INTEGER DEFAULT 0
+        reward DOUBLE PRECISION,
+        max_uses INT,
+        current_uses INT DEFAULT 0
     )
     """)
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS used_promos (
-        user_id INTEGER,
+        user_id BIGINT,
         code TEXT,
         PRIMARY KEY (user_id, code)
     )
     """)
 
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
 init_db()
 
@@ -152,60 +158,65 @@ def get_user_display_name(username: str | None, first_name: str | None = None, f
     return f"Игрок {fallback_id}" if fallback_id else "Игрок"
 
 def log_action(user_id: int, action: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO user_logs (user_id, action) VALUES (?, ?)", (user_id, action))
+    cursor.execute("INSERT INTO user_logs (user_id, action) VALUES (%s, %s)", (user_id, action))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
 def is_line_open() -> bool:
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = 'line_open'")
     res = cursor.fetchone()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
     return res[0] == "1" if res else True
 
 def set_line_status(status: bool):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE settings SET value = ? WHERE key = 'line_open'", ("1" if status else "0",))
+    cursor.execute("UPDATE settings SET value = %s WHERE key = 'line_open'", ("1" if status else "0",))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
 def get_user(user_id: int, username: str = ""):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username, balance, is_banned, last_bonus FROM users WHERE user_id = ?", (user_id,))
+    cursor.execute("SELECT user_id, username, balance, is_banned, last_bonus FROM users WHERE user_id = %s", (user_id,))
     user = cursor.fetchone()
     if not user:
         clean_username = username.lstrip('@') if username else ""
-        cursor.execute("INSERT INTO users (user_id, username) VALUES (?, ?)", (user_id, clean_username))
+        cursor.execute("INSERT INTO users (user_id, username) VALUES (%s, %s)", (user_id, clean_username))
         conn.commit()
-        cursor.execute("SELECT user_id, username, balance, is_banned, last_bonus FROM users WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT user_id, username, balance, is_banned, last_bonus FROM users WHERE user_id = %s", (user_id,))
         user = cursor.fetchone()
     else:
         if username and user[1] != username.lstrip('@'):
-            cursor.execute("UPDATE users SET username = ? WHERE user_id = ?", (username.lstrip('@'), user_id))
+            cursor.execute("UPDATE users SET username = %s WHERE user_id = %s", (username.lstrip('@'), user_id))
             conn.commit()
             user = (user[0], username.lstrip('@'), user[2], user[3], user[4])
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
     return user
 
 def update_balance(user_id: int, amount: float):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
 def set_balance(user_id: int, new_balance: float):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE settings SET value = ? WHERE key = 'line_open'", ("1",))
-    cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
+    cursor.execute("UPDATE users SET balance = %s WHERE user_id = %s", (new_balance, user_id))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
 async def check_subscription(bot: Bot, user_id: int) -> bool:
     try:
@@ -221,11 +232,11 @@ async def check_subscription(bot: Bot, user_id: int) -> bool:
 
 # --- ДИНАМИЧЕСКИЙ РАСЧЕТ КОЭФФИЦИЕНТОВ НА ОСНОВЕ СТАТИСТИКИ ---
 def calculate_team_odds(home_team: str, away_team: str):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     
     def get_stats(team):
-        cursor.execute("SELECT games_played, wins, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (team,))
+        cursor.execute("SELECT games_played, wins, goals_scored, goals_conceded FROM team_stats WHERE team_name = %s", (team,))
         res = cursor.fetchone()
         if not res or res[0] == 0:
             return {
@@ -247,7 +258,8 @@ def calculate_team_odds(home_team: str, away_team: str):
 
     st_home = get_stats(home_team)
     st_away = get_stats(away_team)
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     f_home = st_home["factor"] * 1.05
     f_away = st_away["factor"]
@@ -288,18 +300,19 @@ def calculate_team_odds(home_team: str, away_team: str):
     )
 
 def recalculate_dynamic_odds(match_id: int):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT home_team, away_team FROM matches WHERE id = ?", (match_id,))
+    cursor.execute("SELECT home_team, away_team FROM matches WHERE id = %s", (match_id,))
     match = cursor.fetchone()
     if not match:
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
         return
 
     p1_b, x_b, p2_b, tb_b, tm_b, oz_y_b, oz_n_b = calculate_team_odds(match[0], match[1])
 
-    cursor.execute("SELECT outcome, SUM(amount) FROM bets WHERE match_id = ? AND is_express = 0 GROUP BY outcome", (match_id,))
+    cursor.execute("SELECT outcome, SUM(amount) FROM bets WHERE match_id = %s AND is_express = 0 GROUP BY outcome", (match_id,))
     pools = dict(cursor.fetchall())
 
     def adjust_kef(base_kef, outcome_key, factor=0.00005, min_val=1.05, max_val=5.0):
@@ -317,16 +330,17 @@ def recalculate_dynamic_odds(match_id: int):
 
     cursor.execute("""
         UPDATE matches 
-        SET kef_p1 = ?, kef_x = ?, kef_p2 = ?, kef_tb = ?, kef_tm = ?, kef_oz_yes = ?, kef_oz_no = ?
-        WHERE id = ?
+        SET kef_p1 = %s, kef_x = %s, kef_p2 = %s, kef_tb = %s, kef_tm = %s, kef_oz_yes = %s, kef_oz_no = %s
+        WHERE id = %s
     """, (k_p1, k_x, k_p2, k_tb, k_tm, k_oz_yes, k_oz_no, match_id))
 
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ УПРАВЛЕНИЯ КОМАНДАМИ =================
 def get_all_teams():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT DISTINCT name FROM (
@@ -335,22 +349,23 @@ def get_all_teams():
             SELECT home_team AS name FROM matches
             UNION
             SELECT away_team AS name FROM matches
-        ) WHERE name IS NOT NULL AND name != '' ORDER BY name ASC
+        ) sub WHERE name IS NOT NULL AND name != '' ORDER BY name ASC
     """)
     teams = [r[0] for r in cursor.fetchall()]
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
     return teams
 
 def update_express_details_for_team(cursor, old_name: str, new_name: str):
-    cursor.execute("SELECT id, express_details FROM bets WHERE is_express = 1 AND express_details LIKE ?", (f"%{old_name}%",))
+    cursor.execute("SELECT id, express_details FROM bets WHERE is_express = 1 AND express_details LIKE %s", (f"%{old_name}%",))
     exp_bets = cursor.fetchall()
     for b_id, details in exp_bets:
         if details:
             new_details = details.replace(old_name, new_name)
-            cursor.execute("UPDATE bets SET express_details = ? WHERE id = ?", (new_details, b_id))
+            cursor.execute("UPDATE bets SET express_details = %s WHERE id = %s", (new_details, b_id))
 
 def trigger_recalc_for_team(cursor, team_name: str):
-    cursor.execute("SELECT id FROM matches WHERE status = 'OPEN' AND (home_team = ? OR away_team = ?)", (team_name, team_name))
+    cursor.execute("SELECT id FROM matches WHERE status = 'OPEN' AND (home_team = %s OR away_team = %s)", (team_name, team_name))
     matches = cursor.fetchall()
     for m in matches:
         recalculate_dynamic_odds(m[0])
@@ -367,7 +382,6 @@ class AdminStates(StatesGroup):
     waiting_promo_reward = State()
     waiting_promo_uses = State()
     waiting_broadcast_message = State()
-    # Состояния команд
     rename_team_input = State()
     merge_teams_new_name = State()
 
@@ -468,12 +482,13 @@ async def cb_profile(call: CallbackQuery):
     user = get_user(call.from_user.id, call.from_user.username)
     log_action(call.from_user.id, "Открыл профиль")
     
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*), SUM(CASE WHEN status='WIN' THEN 1 ELSE 0 END) FROM bets WHERE user_id = ?", (call.from_user.id,))
+    cursor.execute("SELECT COUNT(*), SUM(CASE WHEN status='WIN' THEN 1 ELSE 0 END) FROM bets WHERE user_id = %s", (call.from_user.id,))
     total, wins = cursor.fetchone()
     wins = wins or 0
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     display_name = get_user_display_name(call.from_user.username, call.from_user.first_name, call.from_user.id)
     text = (
@@ -496,11 +511,12 @@ async def cb_bonus(call: CallbackQuery):
         return
 
     update_balance(call.from_user.id, 500)
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET last_bonus = ? WHERE user_id = ?", (today, call.from_user.id))
+    cursor.execute("UPDATE users SET last_bonus = %s WHERE user_id = %s", (today, call.from_user.id))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     log_action(call.from_user.id, "Получил ежедневный бонус +500")
     await call.answer("🎁 Вы получили +500 монет!", show_alert=True)
@@ -509,18 +525,19 @@ async def cb_bonus(call: CallbackQuery):
 @router.callback_query(F.data == "menu_leaderboard")
 async def cb_leaderboard(call: CallbackQuery):
     log_action(call.from_user.id, "Открыл Топ Каперов")
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT u.username, u.user_id, COALESCE(SUM(b.payout - b.amount), 0) as net_profit
         FROM users u
         LEFT JOIN bets b ON u.user_id = b.user_id AND b.status IN ('WIN', 'LOSE')
-        GROUP BY u.user_id
+        GROUP BY u.username, u.user_id
         ORDER BY net_profit DESC, u.balance DESC
         LIMIT 10
     """)
     top = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     text = "📊 <b>ТОП-10 КАПЕРОВ (Чистый профит):</b>\n\n"
     if not top:
@@ -545,35 +562,39 @@ async def process_promo_input(message: Message, state: FSMContext):
     user_id = message.from_user.id
     await state.clear()
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT reward, max_uses, current_uses FROM promo_codes WHERE code = ?", (code,))
+    cursor.execute("SELECT reward, max_uses, current_uses FROM promo_codes WHERE code = %s", (code,))
     promo = cursor.fetchone()
 
     if not promo:
         await message.answer("❌ Промокод не существует или недействителен.", reply_markup=main_menu_kb())
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
         return
 
     reward, max_uses, current_uses = promo
 
     if current_uses >= max_uses:
         await message.answer("❌ Лимит активаций этого промокода исчерпан.", reply_markup=main_menu_kb())
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
         return
 
-    cursor.execute("SELECT 1 FROM used_promos WHERE user_id = ? AND code = ?", (user_id, code))
+    cursor.execute("SELECT 1 FROM used_promos WHERE user_id = %s AND code = %s", (user_id, code))
     if cursor.fetchone():
         await message.answer("❌ Вы уже активировали данный промокод!", reply_markup=main_menu_kb())
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
         return
 
     update_balance(user_id, reward)
-    cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = ?", (code,))
-    cursor.execute("INSERT INTO used_promos (user_id, code) VALUES (?, ?)", (user_id, code))
+    cursor.execute("UPDATE promo_codes SET current_uses = current_uses + 1 WHERE code = %s", (code,))
+    cursor.execute("INSERT INTO used_promos (user_id, code) VALUES (%s, %s)", (user_id, code))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     log_action(user_id, f"Активировал промокод {code} (+{reward})")
     await message.answer(f"🎉 Промокод активирован! Вы получили <b>+{reward:,.0f}</b> монет.", reply_markup=main_menu_kb())
@@ -596,11 +617,12 @@ async def cb_line_type(call: CallbackQuery, state: FSMContext):
 # --- ОДИНАР ---
 @router.callback_query(F.data == "menu_line_single")
 async def cb_line_single(call: CallbackQuery):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, home_team, away_team FROM matches WHERE status = 'OPEN'")
     matches = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     if not matches:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_line_type")]])
@@ -619,11 +641,12 @@ async def cb_match(call: CallbackQuery):
     match_id = int(call.data.split("_")[1])
     recalculate_dynamic_odds(match_id)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = ?", (match_id,))
+    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = %s", (match_id,))
     m = cursor.fetchone()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     home, away = html.escape(m[0]), html.escape(m[1])
     text = (
@@ -669,11 +692,12 @@ async def cb_bet_init(call: CallbackQuery, state: FSMContext):
 
     recalculate_dynamic_odds(match_id)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = ?", (match_id,))
+    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = %s", (match_id,))
     m = cursor.fetchone()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     kef_map = {
         "P1": m[2], "X": m[3], "P2": m[4],
@@ -762,15 +786,16 @@ async def process_bet_amount(message: Message, state: FSMContext, bot: Bot):
 
     update_balance(user_id, -amount)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO bets (user_id, match_id, outcome, kef, amount) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO bets (user_id, match_id, outcome, kef, amount) VALUES (%s, %s, %s, %s, %s) RETURNING id",
         (user_id, match_id, data["outcome"], data["kef"], amount)
     )
-    bet_id = cursor.lastrowid
+    bet_id = cursor.fetchone()[0]
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     recalculate_dynamic_odds(match_id)
 
@@ -802,11 +827,12 @@ async def process_bet_amount(message: Message, state: FSMContext, bot: Bot):
             )
             sent = await bot.send_message(chat_id=CHANNEL_ID, text=post_text)
             
-            conn = sqlite3.connect(DB_NAME)
+            conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("UPDATE bets SET channel_msg_id = ?, original_text = ? WHERE id = ?", (sent.message_id, post_text, bet_id))
+            cursor.execute("UPDATE bets SET channel_msg_id = %s, original_text = %s WHERE id = %s", (sent.message_id, post_text, bet_id))
             conn.commit()
-            conn.close()
+            cursor.close()
+            release_db_connection(conn)
         except Exception as e:
             logging.error(f"Ошибка отправки в Live-канал: {e}")
 
@@ -816,11 +842,12 @@ async def cb_express_start(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     selected_ids = data.get("express_selected", [])
     
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, home_team, away_team FROM matches WHERE status = 'OPEN'")
     matches = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     if not matches or len(matches) < 2:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_line_type")]])
@@ -879,12 +906,12 @@ async def ask_express_match_outcome(message: Message, state: FSMContext):
         summary_lines = []
         express_matches_data = []
 
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         cursor = conn.cursor()
 
         for m_id, choice in choices.items():
             recalculate_dynamic_odds(m_id)
-            cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = ?", (m_id,))
+            cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = %s", (m_id,))
             m = cursor.fetchone()
 
             k_map = {"P1": m[2], "X": m[3], "P2": m[4], "TB": m[5], "TM": m[6], "OZ_YES": m[7], "OZ_NO": m[8], "SCORE": m[9]}
@@ -900,7 +927,8 @@ async def ask_express_match_outcome(message: Message, state: FSMContext):
                 "kef": kef
             })
 
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
 
         total_kef = round(total_kef, 2)
         await state.update_data(
@@ -924,11 +952,12 @@ async def ask_express_match_outcome(message: Message, state: FSMContext):
     m_id = selected[idx]
     recalculate_dynamic_odds(m_id)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = ?", (m_id,))
+    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score FROM matches WHERE id = %s", (m_id,))
     m = cursor.fetchone()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     home, away = html.escape(m[0]), html.escape(m[1])
     text = (
@@ -998,15 +1027,16 @@ async def process_express_amount(message: Message, state: FSMContext, bot: Bot):
 
     update_balance(user_id, -amount)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "INSERT INTO bets (user_id, match_id, outcome, kef, amount, is_express, express_details, express_matches) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bets (user_id, match_id, outcome, kef, amount, is_express, express_details, express_matches) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
         (user_id, 0, "EXPRESS", total_kef, amount, 1, summary, matches_json)
     )
-    bet_id = cursor.lastrowid
+    bet_id = cursor.fetchone()[0]
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     log_action(user_id, f"Сделал экспресс {amount} (кэф {total_kef})")
     await state.clear()
@@ -1035,27 +1065,29 @@ async def process_express_amount(message: Message, state: FSMContext, bot: Bot):
             )
             sent = await bot.send_message(chat_id=CHANNEL_ID, text=post_text)
             
-            conn = sqlite3.connect(DB_NAME)
+            conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("UPDATE bets SET channel_msg_id = ?, original_text = ? WHERE id = ?", (sent.message_id, post_text, bet_id))
+            cursor.execute("UPDATE bets SET channel_msg_id = %s, original_text = %s WHERE id = %s", (sent.message_id, post_text, bet_id))
             conn.commit()
-            conn.close()
+            cursor.close()
+            release_db_connection(conn)
         except Exception as e:
             logging.error(f"Ошибка отправки в Live-канал: {e}")
 
 @router.callback_query(F.data == "menu_my_bets")
 async def cb_my_bets(call: CallbackQuery):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
         SELECT m.home_team, m.away_team, b.outcome, b.kef, b.amount, b.status, b.payout, b.is_express, b.express_details
         FROM bets b
         LEFT JOIN matches m ON b.match_id = m.id
-        WHERE b.user_id = ?
+        WHERE b.user_id = %s
         ORDER BY b.id DESC LIMIT 10
     """, (call.from_user.id,))
     bets = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     if not bets:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="menu_main")]])
@@ -1121,7 +1153,6 @@ async def cb_admin_teams(call: CallbackQuery, state: FSMContext):
 
     buttons = []
     for idx, team_name in enumerate(page_teams):
-        # Передаем индекс в списке страницы для краткости callback_data
         buttons.append([InlineKeyboardButton(text=f"🛡 {team_name}", callback_data=f"adm_t_view:{page}:{idx}")])
 
     nav = []
@@ -1151,11 +1182,12 @@ async def cb_admin_team_view(call: CallbackQuery, state: FSMContext):
     team_name = teams[target_idx]
     await state.update_data(current_team=team_name)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (team_name,))
+    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = %s", (team_name,))
     st = cursor.fetchone()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     stats_str = f"Игр: {st[0]} | В: {st[1]} | Н: {st[2]} | П: {st[3]} | ЗГ: {st[4]} | ПГ: {st[5]}" if st else "Статистика отсутствует."
 
@@ -1201,24 +1233,19 @@ async def process_admin_team_rename(message: Message, state: FSMContext):
         await state.clear()
         return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Обновляем team_stats
-    cursor.execute("UPDATE team_stats SET team_name = ? WHERE team_name = ?", (new_name, old_name))
+    cursor.execute("UPDATE team_stats SET team_name = %s WHERE team_name = %s", (new_name, old_name))
+    cursor.execute("UPDATE matches SET home_team = %s WHERE home_team = %s", (new_name, old_name))
+    cursor.execute("UPDATE matches SET away_team = %s WHERE away_team = %s", (new_name, old_name))
 
-    # 2. Обновляем matches (home & away)
-    cursor.execute("UPDATE matches SET home_team = ? WHERE home_team = ?", (new_name, old_name))
-    cursor.execute("UPDATE matches SET away_team = ? WHERE away_team = ?", (new_name, old_name))
-
-    # 3. Обновляем express_details
     update_express_details_for_team(cursor, old_name, new_name)
-
-    # 4. Перерасчет кэфов
     trigger_recalc_for_team(cursor, new_name)
 
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await state.clear()
     await message.answer(
@@ -1303,14 +1330,13 @@ async def process_admin_team_merge_final(message: Message, state: FSMContext):
         await message.answer("❌ Название не может быть пустым!")
         return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
 
-    # 1. Суммируем статистику команд в team_stats
-    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (t1,))
+    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = %s", (t1,))
     st1 = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
 
-    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (t2,))
+    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = %s", (t2,))
     st2 = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
 
     sum_gp = st1[0] + st2[0]
@@ -1320,25 +1346,22 @@ async def process_admin_team_merge_final(message: Message, state: FSMContext):
     sum_gs = st1[4] + st2[4]
     sum_gc = st1[5] + st2[5]
 
-    cursor.execute("DELETE FROM team_stats WHERE team_name IN (?, ?, ?)", (t1, t2, merged_name))
+    cursor.execute("DELETE FROM team_stats WHERE team_name IN (%s, %s, %s)", (t1, t2, merged_name))
     cursor.execute("""
         INSERT INTO team_stats (team_name, games_played, wins, draws, losses, goals_scored, goals_conceded)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
     """, (merged_name, sum_gp, sum_w, sum_d, sum_l, sum_gs, sum_gc))
 
-    # 2. Обновляем матчи t1 и t2 на merged_name
-    cursor.execute("UPDATE matches SET home_team = ? WHERE home_team IN (?, ?)", (merged_name, t1, t2))
-    cursor.execute("UPDATE matches SET away_team = ? WHERE away_team IN (?, ?)", (merged_name, t1, t2))
+    cursor.execute("UPDATE matches SET home_team = %s WHERE home_team IN (%s, %s)", (merged_name, t1, t2))
+    cursor.execute("UPDATE matches SET away_team = %s WHERE away_team IN (%s, %s)", (merged_name, t1, t2))
 
-    # 3. Обновляем экспрессы
     update_express_details_for_team(cursor, t1, merged_name)
     update_express_details_for_team(cursor, t2, merged_name)
-
-    # 4. Перерасчет кэфов
     trigger_recalc_for_team(cursor, merged_name)
 
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await state.clear()
     await message.answer(
@@ -1354,11 +1377,12 @@ async def cb_admin_team_delete(call: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     team_name = data.get("current_team")
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM team_stats WHERE team_name = ?", (team_name,))
+    cursor.execute("DELETE FROM team_stats WHERE team_name = %s", (team_name,))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await state.clear()
     await call.answer(f"🗑 Команда {team_name} удалена из базы статистики!", show_alert=True)
@@ -1380,11 +1404,12 @@ async def cb_admin_broadcast(call: CallbackQuery, state: FSMContext):
 async def process_admin_broadcast(message: Message, state: FSMContext, bot: Bot):
     if message.from_user.id not in ADMIN_IDS: return
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
     users = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await message.answer(f"⏳ Начинаю рассылку для {len(users)} пользователей...")
 
@@ -1447,14 +1472,15 @@ async def admin_promo_uses(message: Message, state: FSMContext):
     p_uses = int(message.text)
     await state.clear()
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO promo_codes (code, reward, max_uses) VALUES (?, ?, ?)
-        ON CONFLICT(code) DO UPDATE SET reward=excluded.reward, max_uses=excluded.max_uses, current_uses=0
+        INSERT INTO promo_codes (code, reward, max_uses) VALUES (%s, %s, %s)
+        ON CONFLICT(code) DO UPDATE SET reward=EXCLUDED.reward, max_uses=EXCLUDED.max_uses, current_uses=0
     """, (p_name, p_reward, p_uses))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await message.answer(
         f"✅ Промокод <code>{html.escape(p_name)}</code> успешно создан!\n"
@@ -1467,11 +1493,12 @@ async def admin_promo_uses(message: Message, state: FSMContext):
 @router.callback_query(F.data == "admin_matches")
 async def cb_admin_matches(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, home_team, away_team, status FROM matches WHERE status != 'ARCHIVED' ORDER BY id DESC LIMIT 15")
     matches = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     buttons = [[InlineKeyboardButton(text="➕ Создать матч", callback_data="admin_add_match")]]
     for m in matches:
@@ -1484,11 +1511,12 @@ async def cb_admin_matches(call: CallbackQuery):
 @router.callback_query(F.data == "admin_archive_matches")
 async def cb_admin_archive_matches(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, home_team, away_team, status FROM matches WHERE status = 'ARCHIVED' ORDER BY id DESC LIMIT 20")
     matches = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     if not matches:
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В Админку", callback_data="admin_main")]])
@@ -1514,14 +1542,15 @@ async def process_admin_add_match(message: Message, state: FSMContext):
         home, away = [x.strip() for x in message.text.split("-")]
         p1, x, p2, tb, tm, oz_y, oz_n = calculate_team_odds(home, away)
 
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO matches (home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (home, away, p1, x, p2, tb, tm, oz_y, oz_n)
+            "INSERT INTO matches (home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (home, away, p1, x, p2, tb, tm, oz_y, oz_n, 2.80)
         )
         conn.commit()
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
 
         await state.clear()
         home_esc, away_esc = html.escape(home), html.escape(away)
@@ -1531,7 +1560,8 @@ async def process_admin_add_match(message: Message, state: FSMContext):
             f"ТБ 2.5 <code>{tb}</code> | ТМ 2.5 <code>{tm}</code> | ОЗ Да <code>{oz_y}</code> | ОЗ Нет <code>{oz_n}</code>",
             reply_markup=admin_main_kb()
         )
-    except Exception:
+    except Exception as e:
+        logging.error(f"Error adding match: {e}")
         await message.answer("❌ Ошибка формата! Используйте: <code>Команда1 - Команда2</code>")
 
 @router.callback_query(F.data.startswith("admin_m_"))
@@ -1541,14 +1571,15 @@ async def cb_admin_match_detail(call: CallbackQuery):
 
     recalculate_dynamic_odds(match_id)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score, status FROM matches WHERE id = ?", (match_id,))
+    cursor.execute("SELECT home_team, away_team, kef_p1, kef_x, kef_p2, kef_tb, kef_tm, kef_oz_yes, kef_oz_no, kef_exact_score, status FROM matches WHERE id = %s", (match_id,))
     m = cursor.fetchone()
     
-    cursor.execute("SELECT outcome, SUM(amount), COUNT(*) FROM bets WHERE match_id = ? GROUP BY outcome", (match_id,))
+    cursor.execute("SELECT outcome, SUM(amount), COUNT(*) FROM bets WHERE match_id = %s GROUP BY outcome", (match_id,))
     pools = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     pool_str = "\n".join([f"• <code>{p[0]}</code>: {p[1]:,.0f} монет ({p[2]} ставок)" for p in pools]) or "Ставок нет."
 
@@ -1585,16 +1616,16 @@ async def process_edit_teams(message: Message, state: FSMContext):
         data = await state.get_data()
         m_id = data["edit_match_id"]
 
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("UPDATE matches SET home_team = ?, away_team = ? WHERE id = ?", (home, away, m_id))
+        cursor.execute("UPDATE matches SET home_team = %s, away_team = %s WHERE id = %s", (home, away, m_id))
         conn.commit()
 
-        # Запускаем перерасчет после измененных имен
         trigger_recalc_for_team(cursor, home)
         trigger_recalc_for_team(cursor, away)
 
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
 
         await state.clear()
         await message.answer("✅ Названия команд успешно изменены!", reply_markup=admin_main_kb())
@@ -1616,11 +1647,12 @@ async def process_edit_kefs(message: Message, state: FSMContext):
         data = await state.get_data()
         m_id = data["edit_match_id"]
 
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("UPDATE matches SET kef_p1 = ?, kef_x = ?, kef_p2 = ? WHERE id = ?", (p1, x, p2, m_id))
+        cursor.execute("UPDATE matches SET kef_p1 = %s, kef_x = %s, kef_p2 = %s WHERE id = %s", (p1, x, p2, m_id))
         conn.commit()
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
 
         await state.clear()
         await message.answer("✅ Коэффициенты успешно обновлены!", reply_markup=admin_main_kb())
@@ -1631,11 +1663,12 @@ async def process_edit_kefs(message: Message, state: FSMContext):
 async def cb_am_archive(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE matches SET status = 'ARCHIVED' WHERE id = ?", (match_id,))
+    cursor.execute("UPDATE matches SET status = 'ARCHIVED' WHERE id = %s", (match_id,))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await call.answer("📦 Матч отправлен в Архив!", show_alert=True)
     await cb_admin_matches(call)
@@ -1644,12 +1677,13 @@ async def cb_am_archive(call: CallbackQuery):
 async def cb_am_delete(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
     match_id = int(call.data.split("_")[2])
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM matches WHERE id = ?", (match_id,))
-    cursor.execute("DELETE FROM bets WHERE match_id = ? AND is_express = 0", (match_id,))
+    cursor.execute("DELETE FROM matches WHERE id = %s", (match_id,))
+    cursor.execute("DELETE FROM bets WHERE match_id = %s AND is_express = 0", (match_id,))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await call.answer("🗑 Матч успешно удален!", show_alert=True)
     await cb_admin_matches(call)
@@ -1685,29 +1719,29 @@ async def process_admin_finish(message: Message, state: FSMContext, bot: Bot):
         data = await state.get_data()
         match_id = data["finish_match_id"]
 
-        conn = sqlite3.connect(DB_NAME)
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute("SELECT home_team, away_team FROM matches WHERE id = ?", (match_id,))
+        cursor.execute("SELECT home_team, away_team FROM matches WHERE id = %s", (match_id,))
         home, away = cursor.fetchone()
 
-        cursor.execute("UPDATE matches SET status = 'FINISHED', score_home = ?, score_away = ? WHERE id = ?", (sh, sa, match_id))
+        cursor.execute("UPDATE matches SET status = 'FINISHED', score_home = %s, score_away = %s WHERE id = %s", (sh, sa, match_id))
 
         def update_team(team, scored, conceded, win, draw):
-            cursor.execute("INSERT OR IGNORE INTO team_stats (team_name) VALUES (?)", (team,))
+            cursor.execute("INSERT INTO team_stats (team_name) VALUES (%s) ON CONFLICT (team_name) DO NOTHING", (team,))
             w = 1 if win else 0
             d = 1 if draw else 0
             l = 1 if (not win and not draw) else 0
             cursor.execute("""
-                UPDATE team_stats SET games_played = games_played + 1, wins = wins + ?, draws = draws + ?, losses = losses + ?,
-                goals_scored = goals_scored + ?, goals_conceded = goals_conceded + ? WHERE team_name = ?
+                UPDATE team_stats SET games_played = games_played + 1, wins = wins + %s, draws = draws + %s, losses = losses + %s,
+                goals_scored = goals_scored + %s, goals_conceded = goals_conceded + %s WHERE team_name = %s
             """, (w, d, l, scored, conceded, team))
 
         update_team(home, sh, sa, sh > sa, sh == sa)
         update_team(away, sa, sh, sa > sh, sh == sa)
 
         # 1. Расчет одинаров
-        cursor.execute("SELECT id, user_id, outcome, kef, amount, channel_msg_id, original_text FROM bets WHERE match_id = ? AND status = 'PENDING' AND is_express = 0", (match_id,))
+        cursor.execute("SELECT id, user_id, outcome, kef, amount, channel_msg_id, original_text FROM bets WHERE match_id = %s AND status = 'PENDING' AND is_express = 0", (match_id,))
         bets = cursor.fetchall()
 
         for b in bets:
@@ -1716,9 +1750,9 @@ async def process_admin_finish(message: Message, state: FSMContext, bot: Bot):
             payout = amount * kef if win else 0.0
             st = "WIN" if win else "LOSE"
 
-            cursor.execute("UPDATE bets SET status = ?, payout = ? WHERE id = ?", (st, payout, b_id))
+            cursor.execute("UPDATE bets SET status = %s, payout = %s WHERE id = %s", (st, payout, b_id))
             if win:
-                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (payout, u_id))
+                cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (payout, u_id))
 
             if channel_msg_id:
                 try:
@@ -1745,7 +1779,7 @@ async def process_admin_finish(message: Message, state: FSMContext, bot: Bot):
                 m_item_id = item["match_id"]
                 m_outcome = item["outcome"]
 
-                cursor.execute("SELECT status, score_home, score_away FROM matches WHERE id = ?", (m_item_id,))
+                cursor.execute("SELECT status, score_home, score_away FROM matches WHERE id = %s", (m_item_id,))
                 m_data = cursor.fetchone()
 
                 if not m_data or m_data[0] not in ['FINISHED', 'ARCHIVED']:
@@ -1755,7 +1789,7 @@ async def process_admin_finish(message: Message, state: FSMContext, bot: Bot):
                         express_lost = True
 
             if express_lost:
-                cursor.execute("UPDATE bets SET status = 'LOSE', payout = 0.0 WHERE id = ?", (eb_id,))
+                cursor.execute("UPDATE bets SET status = 'LOSE', payout = 0.0 WHERE id = %s", (eb_id,))
                 if channel_msg_id:
                     try:
                         updated_text = f"{original_text}\n\n───────────────────\n❌ <b>Экспресс проигран!</b>"
@@ -1764,8 +1798,8 @@ async def process_admin_finish(message: Message, state: FSMContext, bot: Bot):
 
             elif all_finished and not express_lost:
                 payout = amount * total_kef
-                cursor.execute("UPDATE bets SET status = 'WIN', payout = ? WHERE id = ?", (payout, eb_id))
-                cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (payout, u_id))
+                cursor.execute("UPDATE bets SET status = 'WIN', payout = %s WHERE id = %s", (payout, eb_id))
+                cursor.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (payout, u_id))
                 if channel_msg_id:
                     try:
                         updated_text = f"{original_text}\n\n───────────────────\n✅ <b>ЭКСПРЕСС ВЫИГРАЛ!</b>\n💰 Выплата: <b>{payout:,.0f} монет</b>"
@@ -1773,7 +1807,8 @@ async def process_admin_finish(message: Message, state: FSMContext, bot: Bot):
                     except Exception as e: logging.error(f"Ошибка апдейта канала (Экспресс): {e}")
 
         conn.commit()
-        conn.close()
+        cursor.close()
+        release_db_connection(conn)
 
         await state.clear()
         home_esc, away_esc = html.escape(home), html.escape(away)
@@ -1787,14 +1822,15 @@ async def cb_admin_users(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
     page = int(call.data.split("_")[2])
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), SUM(CASE WHEN user_id IN (SELECT DISTINCT user_id FROM bets) THEN 1 ELSE 0 END) FROM users")
     total_u, active_u = cursor.fetchone()
 
-    cursor.execute("SELECT user_id, username, balance, is_banned FROM users ORDER BY user_id DESC LIMIT 10 OFFSET ?", (page * 10,))
+    cursor.execute("SELECT user_id, username, balance, is_banned FROM users ORDER BY user_id DESC LIMIT 10 OFFSET %s", (page * 10,))
     users = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     text = f"👥 <b>Управление игроками:</b>\nВсего пользователей: <code>{total_u}</code> | Активных: <code>{active_u or 0}</code>\nСтраница: {page + 1}"
 
@@ -1887,11 +1923,12 @@ async def cb_toggle_ban(call: CallbackQuery):
     user = get_user(u_id)
     new_status = 0 if user[3] == 1 else 1
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (new_status, u_id))
+    cursor.execute("UPDATE users SET is_banned = %s WHERE user_id = %s", (new_status, u_id))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await call.answer("Статус бана изменен!", show_alert=True)
     await cb_admin_user_card(call)
@@ -1900,11 +1937,12 @@ async def cb_toggle_ban(call: CallbackQuery):
 async def cb_user_logs(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
     u_id = int(call.data.split("_")[2])
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT action, timestamp FROM user_logs WHERE user_id = ? AND timestamp >= datetime('now', '-1 day') ORDER BY id DESC LIMIT 15", (u_id,))
+    cursor.execute("SELECT action, timestamp FROM user_logs WHERE user_id = %s AND timestamp >= NOW() - INTERVAL '1 day' ORDER BY id DESC LIMIT 15", (u_id,))
     logs = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     text = f"📋 <b>Логи игрока <code>{u_id}</code> за 24 часа:</b>\n\n"
     for l in logs:
@@ -1918,12 +1956,13 @@ async def cb_user_logs(call: CallbackQuery):
 async def cb_user_reset(call: CallbackQuery):
     if call.from_user.id not in ADMIN_IDS: return
     u_id = int(call.data.split("_")[2])
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("UPDATE users SET balance = 0.0 WHERE user_id = ?", (u_id,))
-    cursor.execute("DELETE FROM bets WHERE user_id = ?", (u_id,))
+    cursor.execute("UPDATE users SET balance = 0.0 WHERE user_id = %s", (u_id,))
+    cursor.execute("DELETE FROM bets WHERE user_id = %s", (u_id,))
     conn.commit()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     await call.answer("Прогресс и баланс игрока сброшены до 0!", show_alert=True)
     await cb_admin_user_card(call)
@@ -1933,11 +1972,12 @@ async def cb_user_reset(call: CallbackQuery):
 async def cb_admin_daily_bet(call: CallbackQuery, state: FSMContext):
     if call.from_user.id not in ADMIN_IDS: return
     
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT id, home_team, away_team, kef_p1, kef_p2 FROM matches WHERE status = 'OPEN'")
     matches = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     if not matches:
         await call.answer("❌ Нет открытых матчей для создания Ставки Дня!", show_alert=True)
@@ -1979,11 +2019,12 @@ async def cb_approve_daily(call: CallbackQuery, state: FSMContext, bot: Bot):
     bet_text = data.get("daily_text")
     kef = data.get("daily_kef")
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE is_banned = 0")
     users = cursor.fetchall()
-    conn.close()
+    cursor.close()
+    release_db_connection(conn)
 
     msg = f"🔥 <b>СТАВКА ДНЯ В FTCL³ BET!</b>\n\n{bet_text}\n\n🚀 Повышенный кэф: <b>{kef}</b>\n\nЗаходи в бота и успей сделать ставку!"
     
