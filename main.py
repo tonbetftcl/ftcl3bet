@@ -202,6 +202,7 @@ def update_balance(user_id: int, amount: float):
 def set_balance(user_id: int, new_balance: float):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+    cursor.execute("UPDATE settings SET value = ? WHERE key = 'line_open'", ("1",))
     cursor.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, user_id))
     conn.commit()
     conn.close()
@@ -323,6 +324,37 @@ def recalculate_dynamic_odds(match_id: int):
     conn.commit()
     conn.close()
 
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ УПРАВЛЕНИЯ КОМАНДАМИ =================
+def get_all_teams():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT DISTINCT name FROM (
+            SELECT team_name AS name FROM team_stats
+            UNION
+            SELECT home_team AS name FROM matches
+            UNION
+            SELECT away_team AS name FROM matches
+        ) WHERE name IS NOT NULL AND name != '' ORDER BY name ASC
+    """)
+    teams = [r[0] for r in cursor.fetchall()]
+    conn.close()
+    return teams
+
+def update_express_details_for_team(cursor, old_name: str, new_name: str):
+    cursor.execute("SELECT id, express_details FROM bets WHERE is_express = 1 AND express_details LIKE ?", (f"%{old_name}%",))
+    exp_bets = cursor.fetchall()
+    for b_id, details in exp_bets:
+        if details:
+            new_details = details.replace(old_name, new_name)
+            cursor.execute("UPDATE bets SET express_details = ? WHERE id = ?", (new_details, b_id))
+
+def trigger_recalc_for_team(cursor, team_name: str):
+    cursor.execute("SELECT id FROM matches WHERE status = 'OPEN' AND (home_team = ? OR away_team = ?)", (team_name, team_name))
+    matches = cursor.fetchall()
+    for m in matches:
+        recalculate_dynamic_odds(m[0])
+
 # ================= FSM STATES =================
 class AdminStates(StatesGroup):
     add_match_teams = State()
@@ -335,6 +367,9 @@ class AdminStates(StatesGroup):
     waiting_promo_reward = State()
     waiting_promo_uses = State()
     waiting_broadcast_message = State()
+    # Состояния команд
+    rename_team_input = State()
+    merge_teams_new_name = State()
 
 class UserStates(StatesGroup):
     enter_bet_amount = State()
@@ -379,6 +414,7 @@ def admin_main_kb():
     line_str = "❌ Закрыть Линию" if is_line_open() else "✅ Открыть Линию"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚽ Управление матчами", callback_data="admin_matches")],
+        [InlineKeyboardButton(text="📋 Команды", callback_data="admin_teams_0")],
         [InlineKeyboardButton(text="📦 Архив матчей", callback_data="admin_archive_matches")],
         [InlineKeyboardButton(text="👥 Управление игроками", callback_data="admin_users_0")],
         [InlineKeyboardButton(text="📢 Массовая Рассылка", callback_data="admin_broadcast")],
@@ -1066,6 +1102,268 @@ async def cb_admin_toggle_line(call: CallbackQuery):
     await call.answer(f"Линия ставок теперь {status_str}!", show_alert=True)
     await call.message.edit_reply_markup(reply_markup=admin_main_kb())
 
+# --- УПРАВЛЕНИЕ КОМАНДАМИ (CRUD + СЛИЯНИЕ) ---
+@router.callback_query(F.data.startswith("admin_teams_"))
+async def cb_admin_teams(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    await state.clear()
+    page = int(call.data.split("_")[2])
+    teams = get_all_teams()
+
+    if not teams:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ В Админку", callback_data="admin_main")]])
+        await call.message.edit_text("📋 <b>Список команд пуст.</b>", reply_markup=kb)
+        return
+
+    items_per_page = 10
+    total_pages = (len(teams) + items_per_page - 1) // items_per_page
+    page_teams = teams[page * items_per_page : (page + 1) * items_per_page]
+
+    buttons = []
+    for idx, team_name in enumerate(page_teams):
+        # Передаем индекс в списке страницы для краткости callback_data
+        buttons.append([InlineKeyboardButton(text=f"🛡 {team_name}", callback_data=f"adm_t_view:{page}:{idx}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_teams_{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"admin_teams_{page + 1}"))
+
+    if nav: buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="⬅️ В Админку", callback_data="admin_main")])
+
+    text = f"📋 <b>Управление командами</b> (Всего: <code>{len(teams)}</code>)\nСтраница: {page + 1}/{total_pages}"
+    await call.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("adm_t_view:"))
+async def cb_admin_team_view(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    parts = call.data.split(":")
+    page, idx = int(parts[1]), int(parts[2])
+    teams = get_all_teams()
+
+    target_idx = page * 10 + idx
+    if target_idx >= len(teams):
+        await call.answer("Команда не найдена!", show_alert=True)
+        return
+
+    team_name = teams[target_idx]
+    await state.update_data(current_team=team_name)
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (team_name,))
+    st = cursor.fetchone()
+    conn.close()
+
+    stats_str = f"Игр: {st[0]} | В: {st[1]} | Н: {st[2]} | П: {st[3]} | ЗГ: {st[4]} | ПГ: {st[5]}" if st else "Статистика отсутствует."
+
+    text = (
+        f"🛡 <b>Команда: {html.escape(team_name)}</b>\n\n"
+        f"📊 <b>Статистика:</b>\n{stats_str}\n\n"
+        f"Выберите действие:"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data="adm_t_rename")],
+        [InlineKeyboardButton(text="🔀 Совместить клуб", callback_data=f"adm_t_merge_sel:{page}:{idx}")],
+        [InlineKeyboardButton(text="🗑 Удалить команду", callback_data="adm_t_delete")],
+        [InlineKeyboardButton(text="⬅️ К списку команд", callback_data=f"admin_teams_{page}")]
+    ])
+
+    await call.message.edit_text(text, reply_markup=kb)
+
+# --- ИЗМЕНЕНИЕ НАЗВАНИЯ КОМАНДЫ ---
+@router.callback_query(F.data == "adm_t_rename")
+async def cb_admin_team_rename(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    data = await state.get_data()
+    team_name = data.get("current_team")
+    
+    await state.set_state(AdminStates.rename_team_input)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_teams_0")]])
+    await call.message.edit_text(
+        f"✏️ Введите новое название для команды <b>{html.escape(team_name)}</b>:\n"
+        f"<i>(Все матчи, статистика и открытые ставки будут обновлены)</i>",
+        reply_markup=kb
+    )
+
+@router.message(AdminStates.rename_team_input)
+async def process_admin_team_rename(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    new_name = message.text.strip()
+    data = await state.get_data()
+    old_name = data.get("current_team")
+
+    if not new_name or old_name == new_name:
+        await message.answer("❌ Новое название должно отличаться от старого!", reply_markup=admin_main_kb())
+        await state.clear()
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    # 1. Обновляем team_stats
+    cursor.execute("UPDATE team_stats SET team_name = ? WHERE team_name = ?", (new_name, old_name))
+
+    # 2. Обновляем matches (home & away)
+    cursor.execute("UPDATE matches SET home_team = ? WHERE home_team = ?", (new_name, old_name))
+    cursor.execute("UPDATE matches SET away_team = ? WHERE away_team = ?", (new_name, old_name))
+
+    # 3. Обновляем express_details
+    update_express_details_for_team(cursor, old_name, new_name)
+
+    # 4. Перерасчет кэфов
+    trigger_recalc_for_team(cursor, new_name)
+
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Команда <b>{html.escape(old_name)}</b> успешно переименована в <b>{html.escape(new_name)}</b>!\n"
+        f"Все результаты и ставки были перенесены.",
+        reply_markup=admin_main_kb()
+    )
+
+# --- СЛИЯНИЕ (СОВМЕЩЕНИЕ) КОМАНД ---
+@router.callback_query(F.data.startswith("adm_t_merge_sel:"))
+async def cb_admin_team_merge_select(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    parts = call.data.split(":")
+    page, idx = int(parts[1]), int(parts[2])
+    
+    data = await state.get_data()
+    team1 = data.get("current_team")
+
+    teams = [t for t in get_all_teams() if t != team1]
+    
+    if not teams:
+        await call.answer("Нет других команд для совмещения!", show_alert=True)
+        return
+
+    items_per_page = 10
+    total_pages = (len(teams) + items_per_page - 1) // items_per_page
+    page_teams = teams[page * items_per_page : (page + 1) * items_per_page]
+
+    buttons = []
+    for i, t_name in enumerate(page_teams):
+        buttons.append([InlineKeyboardButton(text=f"🤝 {t_name}", callback_data=f"adm_t_merge_target:{page}:{i}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"adm_t_merge_sel:{page-1}:{idx}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"adm_t_merge_sel:{page+1}:{idx}"))
+
+    if nav: buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="❌ Отмена", callback_data="admin_teams_0")])
+
+    await call.message.edit_text(
+        f"🤝 Выберите вторую команду для совмещения с <b>{html.escape(team1)}</b>:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+@router.callback_query(F.data.startswith("adm_t_merge_target:"))
+async def cb_admin_team_merge_target(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    parts = call.data.split(":")
+    page, i = int(parts[1]), int(parts[2])
+
+    data = await state.get_data()
+    team1 = data.get("current_team")
+    teams = [t for t in get_all_teams() if t != team1]
+
+    target_idx = page * 10 + i
+    if target_idx >= len(teams):
+        await call.answer("Команда не найдена!", show_alert=True)
+        return
+
+    team2 = teams[target_idx]
+    await state.update_data(merge_team1=team1, merge_team2=team2)
+    await state.set_state(AdminStates.merge_teams_new_name)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="admin_teams_0")]])
+    await call.message.edit_text(
+        f"🤝 Совмещение команд: <b>{html.escape(team1)}</b> + <b>{html.escape(team2)}</b>\n\n"
+        f"Введите новое название для совмещённой команды в чат:",
+        reply_markup=kb
+    )
+
+@router.message(AdminStates.merge_teams_new_name)
+async def process_admin_team_merge_final(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS: return
+    merged_name = message.text.strip()
+    data = await state.get_data()
+    t1 = data.get("merge_team1")
+    t2 = data.get("merge_team2")
+
+    if not merged_name:
+        await message.answer("❌ Название не может быть пустым!")
+        return
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    # 1. Суммируем статистику команд в team_stats
+    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (t1,))
+    st1 = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
+
+    cursor.execute("SELECT games_played, wins, draws, losses, goals_scored, goals_conceded FROM team_stats WHERE team_name = ?", (t2,))
+    st2 = cursor.fetchone() or (0, 0, 0, 0, 0, 0)
+
+    sum_gp = st1[0] + st2[0]
+    sum_w = st1[1] + st2[1]
+    sum_d = st1[2] + st2[2]
+    sum_l = st1[3] + st2[3]
+    sum_gs = st1[4] + st2[4]
+    sum_gc = st1[5] + st2[5]
+
+    cursor.execute("DELETE FROM team_stats WHERE team_name IN (?, ?, ?)", (t1, t2, merged_name))
+    cursor.execute("""
+        INSERT INTO team_stats (team_name, games_played, wins, draws, losses, goals_scored, goals_conceded)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (merged_name, sum_gp, sum_w, sum_d, sum_l, sum_gs, sum_gc))
+
+    # 2. Обновляем матчи t1 и t2 на merged_name
+    cursor.execute("UPDATE matches SET home_team = ? WHERE home_team IN (?, ?)", (merged_name, t1, t2))
+    cursor.execute("UPDATE matches SET away_team = ? WHERE away_team IN (?, ?)", (merged_name, t1, t2))
+
+    # 3. Обновляем экспрессы
+    update_express_details_for_team(cursor, t1, merged_name)
+    update_express_details_for_team(cursor, t2, merged_name)
+
+    # 4. Перерасчет кэфов
+    trigger_recalc_for_team(cursor, merged_name)
+
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await message.answer(
+        f"✅ Команды <b>{html.escape(t1)}</b> и <b>{html.escape(t2)}</b> успешно совмещены в <b>{html.escape(merged_name)}</b>!\n"
+        f"Вся статистика и результаты соревнований перенесены.",
+        reply_markup=admin_main_kb()
+    )
+
+# --- УДАЛЕНИЕ КОМАНДЫ ---
+@router.callback_query(F.data == "adm_t_delete")
+async def cb_admin_team_delete(call: CallbackQuery, state: FSMContext):
+    if call.from_user.id not in ADMIN_IDS: return
+    data = await state.get_data()
+    team_name = data.get("current_team")
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM team_stats WHERE team_name = ?", (team_name,))
+    conn.commit()
+    conn.close()
+
+    await state.clear()
+    await call.answer(f"🗑 Команда {team_name} удалена из базы статистики!", show_alert=True)
+    await cb_admin_teams(call, state)
+
 # --- Массовая рассылка ---
 @router.callback_query(F.data == "admin_broadcast")
 async def cb_admin_broadcast(call: CallbackQuery, state: FSMContext):
@@ -1291,6 +1589,11 @@ async def process_edit_teams(message: Message, state: FSMContext):
         cursor = conn.cursor()
         cursor.execute("UPDATE matches SET home_team = ?, away_team = ? WHERE id = ?", (home, away, m_id))
         conn.commit()
+
+        # Запускаем перерасчет после измененных имен
+        trigger_recalc_for_team(cursor, home)
+        trigger_recalc_for_team(cursor, away)
+
         conn.close()
 
         await state.clear()
