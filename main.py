@@ -27,8 +27,8 @@ BOT_USERNAME = "@ftcl3bet_bot"
 CHANNEL_ID = -1004329989649             
 CHANNEL_URL = "https://t.me/ftcl3bet_log" 
 
-CHANNEL_2_ID = -1003863595353          
-CHANNEL_2_URL = "https://t.me/Ftcl3News"
+CHANNEL_2_ID = -1004413096276          
+CHANNEL_2_URL = "https://t.me/Ftcl2hub"
 
 ADMIN_IDS = [1866813859]                 
 DB_URI = "postgresql://neondb_owner:npg_BxP6O4gVmfru@ep-hidden-cloud-b2fxw8g8-pooler.c-6.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
@@ -412,7 +412,7 @@ async def ban_check_middleware(handler, event, data):
 def sub_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📢 Канал 1: Ставки & Логи", url=CHANNEL_URL)],
-        [InlineKeyboardButton(text="📢 Канал 2: Новости FTCL³", url=CHANNEL_2_URL)],
+        [InlineKeyboardButton(text="📢 Канал 2: Новости FTCL²", url=CHANNEL_2_URL)],
         [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="check_subscription")]
     ])
 
@@ -457,7 +457,7 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
         return
 
     await message.answer(
-        "🏆 <b>Добро пожаловать в FTCL³ BET!</b>\n\nДелайте ставки на матчи лиги FTCL³, собирайте экспрессы, зарабатывайте монеты и возглавляйте топ каперов!",
+        "🏆 <b>Добро пожаловать в FTCL² BET!</b>\n\nДелайте ставки на матчи лиги FTCL², собирайте экспрессы, зарабатывайте монеты и возглавляйте топ каперов!",
         reply_markup=main_menu_kb()
     )
 
@@ -466,7 +466,7 @@ async def cb_check_sub(call: CallbackQuery, bot: Bot):
     if await check_subscription(bot, call.from_user.id):
         await call.message.delete()
         await call.message.answer(
-            "✅ Подписка подтверждена! Добро пожаловать в FTCL³ BET!",
+            "✅ Подписка подтверждена! Добро пожаловать в FTCL² BET!",
             reply_markup=main_menu_kb()
         )
     else:
@@ -475,7 +475,7 @@ async def cb_check_sub(call: CallbackQuery, bot: Bot):
 @router.callback_query(F.data == "menu_main")
 async def cb_main(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await call.message.edit_text("🏆 <b>Главное меню FTCL³ BET</b>", reply_markup=main_menu_kb())
+    await call.message.edit_text("🏆 <b>Главное меню FTCL² BET</b>", reply_markup=main_menu_kb())
 
 @router.callback_query(F.data == "menu_profile")
 async def cb_profile(call: CallbackQuery):
@@ -2026,7 +2026,7 @@ async def cb_approve_daily(call: CallbackQuery, state: FSMContext, bot: Bot):
     cursor.close()
     release_db_connection(conn)
 
-    msg = f"🔥 <b>СТАВКА ДНЯ В FTCL³ BET!</b>\n\n{bet_text}\n\n🚀 Повышенный кэф: <b>{kef}</b>\n\nЗаходи в бота и успей сделать ставку!"
+    msg = f"🔥 <b>СТАВКА ДНЯ В FTCL² BET!</b>\n\n{bet_text}\n\n🚀 Повышенный кэф: <b>{kef}</b>\n\nЗаходи в бота и успей сделать ставку!"
     
     cnt = 0
     for u in users:
